@@ -1,8 +1,10 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdint.h>
-#include <unistd.h>
-#include <string.h>
+#include <string.h>	// for memcpy
+#include <getopt.h>
+#include <stdbool.h>
+#include <sys/stat.h>
 
 // 1262698832 (0x4b434150)
 #define MAGIC 	(('K' << 24) + ('C' << 16) + ('A' << 8) + 'P')
@@ -11,19 +13,23 @@
 #define MAXFILES 		4096
 #define MAXFILENAME		64	
 
-#define true 	1
-#define false	0
+// #define true 	1
+// #define false	0
 
 #define OPT_VERBOSE		1<<0
 #define OPT_LIST		1<<1
 #define OPT_EXTRACT		1<<2
 #define OPT_CREATE		1<<3
+#define OPT_USAGE		1<<4
+
+typedef unsigned char byte;
 
 // a file in a pak archive
 typedef struct {
 	char name[56];
 	uint32_t offset;
 	uint32_t length;
+	bool legit;
 } pak_file_t;
 
 // the header of the pak archive
@@ -38,18 +44,18 @@ typedef struct {
 	pak_header_t header;
 	pak_file_t *files;		//[MAXFILES]
 	uint32_t position;
+	bool writeable;
 } pak_t;
 
 uint32_t pos;
 uint32_t options;
+uint32_t opt;
+char *pakfilename;
+pak_file_t *filestoadd;
+uint16_t filestoaddcount;
 
-static _Bool usage(int32_t argc, char** argv) {
-	if (argc < 2) {
-		printf("Usage: %s <bspfile> [<bspfile>...]\n", argv[0]);
-		return false;
-	}
-
-	return true;
+static void usage(char *name) {
+	printf("Usage: %s [-lxcf] packfile <file> [<file> ...]\n", name);
 }
 
 uint32_t readLong(char *data, uint32_t offset) {
@@ -57,6 +63,17 @@ uint32_t readLong(char *data, uint32_t offset) {
 		((data[offset+2] & 0xff) << 16) + 
 		((data[offset+1] & 0xff) << 8) + 
 		(data[offset] & 0xff);
+}
+
+byte *writeLong(uint32_t c){
+	static byte buf[4];
+
+    buf[0] = c & 0xff;
+    buf[1] = (c >> 8) & 0xff;
+    buf[2] = (c >> 16) & 0xff;
+    buf[3] = c >> 24;
+
+    return buf;
 }
 
 uint32_t ReadInt(char *data) {
@@ -72,7 +89,6 @@ uint32_t ReadInt(char *data) {
 
 void readString(char *data, size_t len, char *buf) {
 	int32_t i;
-	
 	for (i = 0; i < len; i++) {
 		buf[i] = data[i];
 	}
@@ -86,6 +102,7 @@ void readData(char *data, size_t len, char *buf) {
 	}
 }
 
+/*
 void hexDump (char *desc, void *addr, int len) {
     int i;
     unsigned char buff[17];
@@ -137,6 +154,7 @@ void hexDump (char *desc, void *addr, int len) {
     // And print the final ASCII bit.
     printf ("  %s\n", buff);
 }
+*/
 
 // Get the size of a file on the disk (for adding to pak archive)
 long getFileSize(const char *filename) {
@@ -156,7 +174,7 @@ long getFileSize(const char *filename) {
 	return sz;
 }
 
-_Bool parsePak(char *pakfilename, pak_t *p) {
+bool parsePak(char *pakfilename, pak_t *p) {
 	FILE *fp;
 	char buffer[HEADERLEN];
 	uint32_t i;
@@ -183,12 +201,12 @@ _Bool parsePak(char *pakfilename, pak_t *p) {
 	fread(namebuf, sizeof(namebuf[0]), p->header.length, fp);
 	
 	char name[MAXFILENAME];
-	//int tmp;
+
 	for (i=0; i<p->header.filecount; i++) {
 		memset(name, 0, sizeof(name));
 		readData(namebuf, MAXFILENAME, name);
 		
-		hexDump("name ", &name, sizeof(name));
+		//hexDump("name ", &name, sizeof(name));
 		
 		memcpy(&p->files[i].name, name, 56);
 		
@@ -208,23 +226,158 @@ void listPakFiles(pak_t *p) {
 	}
 }
 
+bool parseArgs(uint32_t argc, char **argv) {
+
+	uint16_t i;
+	options = 0;
+
+	while ((opt = getopt(argc, argv, ":if:lrxhc")) != -1)
+	{
+		switch(opt)
+		{
+			case 'l':
+				options |= OPT_LIST;
+				break;
+			case 'v':
+				options |= OPT_VERBOSE;
+			case 'x':
+				//printf("option: %c\n", opt);
+				options |= OPT_EXTRACT;
+				break;
+			case 'c':
+				options |= OPT_CREATE;
+				options &= ~OPT_LIST & ~OPT_EXTRACT;	// undo these
+				filestoaddcount = 0;
+				break;
+			case 'h':
+				options = 0;
+				options |= OPT_USAGE;
+				break;
+			case 'f':
+				//printf("filename: %s\n", optarg);
+				pakfilename = optarg;
+				break;
+			case ':':
+				printf("option needs a value\n");
+				break;
+			case '?':
+				printf("unknown option: %c\n", optopt);
+				break;
+		}
+	}
+
+	if (options & OPT_CREATE) {
+		//printf("recording files\n");
+		filestoadd = malloc(sizeof(pak_file_t) * argc);
+		memset(filestoadd, 0, sizeof(pak_file_t) * argc);
+
+		for(i=0; optind < argc; optind++, i++){
+			//intf("extra arguments: %s\n", argv[optind]);
+			memcpy(filestoadd[i].name, argv[optind], 56);
+			//printf("%s\n", filestoadd[i].name);
+			filestoaddcount++;
+		}
+	}
+
+	return true;
+}
+
+void createPak(pak_t *pak, pak_file_t *files) {
+	struct stat fs;
+	uint16_t i, totallegit = 0;
+	size_t totalsz = 0;
+	FILE *fp, *fp_src;
+	byte *data;
+	char name[MAXFILENAME];
+
+	data = malloc(1);
+
+	// validate all supplied files getting required data (size, etc)
+	for (i=0; i<filestoaddcount; i++) {
+		//printf("%s\n", files[i].name);
+		if (stat(files[i].name, &fs) < 0) {
+			printf("'%s' - file not found\n", files[i].name);
+			continue;
+		}
+
+		files[i].length = fs.st_size;
+		files[i].offset = totalsz;
+		files[i].legit = true;
+
+		totalsz += files[i].length;
+		totallegit++;
+		//printf("%s - %ld bytes\n", files[i].name, fs.st_size);
+	}
+
+	// make sure the target file doesn't already exist
+	if (!stat(pakfilename, &fs)) {
+		printf("%s already exists\n");
+		return;
+	}
+
+	fp = fopen(pakfilename, "wb");
+
+	fwrite(writeLong(MAGIC), 1, 4, fp);
+	fwrite(writeLong(totalsz), 1, 4, fp);
+	fwrite(writeLong(totallegit * MAXFILENAME), 1, 4, fp);
+
+	// write actual file data
+	for (i=0; i<filestoaddcount; i++) {
+		if (!files[i].legit) {
+			continue;
+		}
+
+		data = realloc(data, files[i].length);
+		fp_src = fopen(files[i].name, "rb");
+		fread(data, sizeof(data), 1, fp_src);
+		fwrite(data, sizeof(data), 1, fp);
+		fclose(fp_src);
+
+	}
+
+	// write the file metadata
+	for (i=0; i<filestoaddcount; i++) {
+		if (!files[i].legit) {
+			continue;
+		}
+
+		memset(&name, 0, MAXFILENAME);
+		memcpy(&name, &files[i].name, 56);
+		memcpy(&name[56], &files[i].offset, 4);
+		memcpy(&name[60], &files[i].length, 4);
+
+		fwrite(&name, MAXFILENAME, 1, fp);
+	}
+
+	fclose(fp);
+}
 
 int32_t main(int32_t argc, char** argv) {
 	
-	/*if (!usage(argc, argv)){
-		return EXIT_FAILURE;
-	}*/
-
 	pak_t pakfile;
-	parsePak(argv[1], &pakfile);
-	
-	listPakFiles(&pakfile);
-	
-	if (pakfile.files) {
-		free(pakfile.files);
+
+	if (!parseArgs(argc, argv)) {
+		return EXIT_FAILURE;
+	}
+
+	if (!options || options & OPT_USAGE) {
+		usage(argv[0]);
+		return EXIT_SUCCESS;
+	}
+
+	if (!pakfilename[0]) {
+		printf("error: no pak file specified, use -f <pakname>\n");
+		return EXIT_SUCCESS;
+	}
+
+	if (options & OPT_LIST) {
+		parsePak(pakfilename, &pakfile);
+		listPakFiles(&pakfile);
 	}
 	
-	//printf("%ld\n", getFileSize(argv[1]));
+	if (options & OPT_CREATE) {
+		createPak(&pakfile, filestoadd);
+	}
 	
 	return EXIT_SUCCESS;
 }
