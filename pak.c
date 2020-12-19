@@ -329,10 +329,11 @@ void createPak(pak_t *pak, pak_file_t *files) {
 
 		data = realloc(data, files[i].length);
 		fp_src = fopen(files[i].name, "rb");
-		fread(data, sizeof(data), 1, fp_src);
-		fwrite(data, sizeof(data), 1, fp);
-		fclose(fp_src);
+		fread(data, 1, files[i].length, fp_src);
+		fwrite(data, 1, files[i].length, fp);
 
+		fclose(fp_src);
+		fflush(fp);
 	}
 
 	// write the file metadata
@@ -342,11 +343,14 @@ void createPak(pak_t *pak, pak_file_t *files) {
 		}
 
 		memset(&name, 0, MAXFILENAME);
-		memcpy(&name, &files[i].name, 56);
-		memcpy(&name[56], &files[i].offset, 4);
-		memcpy(&name[60], &files[i].length, 4);
+		memcpy(&name, files[i].name, 56);
+		//memcpy(&name[56], files[i].offset, 4);
+		//memcpy(&name[60], files[i].length, 4);
 
-		fwrite(&name, MAXFILENAME, 1, fp);
+		fwrite(&name, MAXFILENAME - 8, 1, fp);
+		fwrite(writeLong(files[i].offset), 1, 4, fp);
+		fwrite(writeLong(files[i].length), 1, 4, fp);
+		fflush(fp);
 	}
 
 	fclose(fp);
@@ -365,10 +369,12 @@ int32_t main(int32_t argc, char** argv) {
 		return EXIT_SUCCESS;
 	}
 
+	/*
 	if (!pakfilename[0]) {
 		printf("error: no pak file specified, use -f <pakname>\n");
 		return EXIT_SUCCESS;
 	}
+	*/
 
 	if (options & OPT_LIST) {
 		parsePak(pakfilename, &pakfile);
