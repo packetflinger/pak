@@ -11,7 +11,10 @@
 
 #define HEADERLEN       12
 #define MAXFILES        4096
-#define MAXFILENAME     64
+#define FILENAMELEN     56
+#define FILESIZE        (FILENAMELEN)
+#define FILEOFFSET      (FILESIZE + 4)
+#define FILEBLOCKLEN    64
 
 #define OPT_VERBOSE     1<<0
 #define OPT_LIST        1<<1
@@ -48,9 +51,9 @@ typedef struct {
 } pak_t;
 
 
-uint32_t pos;
-uint32_t options;
-uint32_t opt;
+uint32_t pos = 0;
+uint32_t options = 0;
+uint32_t opt = 0;
 
 char *pakfilename;
 
@@ -61,14 +64,16 @@ uint16_t filestoaddcount;
 /**
  * Show how to use this problem
  */
-static void usage(char *name) {
+static void usage(char *name)
+{
     printf("Usage: %s [-lxcf] packfile <file> [<file> ...]\n", name);
 }
 
 /**
  * Read 4 bytes of binary data from the file as a single number
  */
-uint32_t readLong(char *data, uint32_t offset) {
+uint32_t readLong(char *data, uint32_t offset)
+{
     return ((data[offset+3] & 0xff) << 24) + 
         ((data[offset+2] & 0xff) << 16) + 
         ((data[offset+1] & 0xff) << 8) + 
@@ -78,7 +83,8 @@ uint32_t readLong(char *data, uint32_t offset) {
 /**
  * Write a 32bit integer as 4 bytes in the buffer
  */
-byte *writeLong(uint32_t c){
+byte *writeLong(uint32_t c)
+{
     static byte buf[4];
 
     buf[0] = c & 0xff;
@@ -89,7 +95,8 @@ byte *writeLong(uint32_t c){
     return buf;
 }
 
-uint32_t ReadInt(char *data) {
+uint32_t ReadInt(char *data)
+{
     uint32_t i;
     i = ((data[pos+3] & 0xff) << 24) + 
         ((data[pos+2] & 0xff) << 16) + 
@@ -103,7 +110,8 @@ uint32_t ReadInt(char *data) {
 /**
  * Read a string
  */
-void readString(char *data, size_t len, char *buf) {
+void readString(char *data, size_t len, char *buf)
+{
     int32_t i;
     for (i = 0; i < len; i++) {
         buf[i] = data[i];
@@ -113,7 +121,8 @@ void readString(char *data, size_t len, char *buf) {
 /**
  * Read an arbitrary amount of data
  */
-void readData(char *data, size_t len, char *buf) {
+void readData(char *data, size_t len, char *buf)
+{
     int32_t i;
     for (i = 0; i < len; i++) {
         buf[i] = data[pos];
@@ -121,8 +130,43 @@ void readData(char *data, size_t len, char *buf) {
     }
 }
 
+/**
+ *
+ */
 /*
-void hexDump (char *desc, void *addr, int len) {
+void writeFile(char *file, char *path, uint32_t offset, uint32_t len) {
+    struct stat sb;
+    const char delim[2] = "/";
+    char *token;
+    char *name;
+
+    if (!chdir(path)) {
+        return;
+    }
+
+    token = strtok(file, delim);
+
+    while (token != NULL) {
+        memset(name, 0, strlen(name));
+        memcpy(name, token, strlen(token));
+        printf("%s\n", name);
+
+        token = strtok(NULL, delim);
+
+        // at the end, we're looking at the filename not a parent dir
+        if (token == NULL) {
+                printf("filename: %s\n", name);
+        } else {
+                mkdir(name, 0700);
+                chdir(name);
+        }
+    }
+}
+*/
+
+
+void hexDump (char *desc, void *addr, int len)
+{
     int i;
     unsigned char buff[17];
     unsigned char *pc = (unsigned char*)addr;
@@ -173,13 +217,13 @@ void hexDump (char *desc, void *addr, int len) {
     // And print the final ASCII bit.
     printf ("  %s\n", buff);
 }
-*/
 
 
 /**
  * Get the size of a file on the disk (for adding to pak archive)
  */
-long getFileSize(const char *filename) {
+long getFileSize(const char *filename)
+{
     FILE *fp;
     long sz;
     
@@ -197,11 +241,13 @@ long getFileSize(const char *filename) {
 }
 
 /**
- * Load the pak
+ * Load the pak metadata into a structure
  */
-bool parsePak(char *pakfilename, pak_t *p) {
+bool parsePak(char *pakfilename, pak_t *p)
+{
     FILE *fp;
     char buffer[HEADERLEN];
+    char nameblock[FILEBLOCKLEN];
     uint32_t i;
     
     fp = fopen(pakfilename, "rb");
@@ -215,28 +261,24 @@ bool parsePak(char *pakfilename, pak_t *p) {
     
     p->header.offset = ReadInt(buffer);
     p->header.length = ReadInt(buffer);
-    p->header.filecount = p->header.length / MAXFILENAME; 
+    p->header.filecount = p->header.length / FILEBLOCKLEN;
     p->position = pos;
 
     p->files = malloc(p->header.filecount * sizeof(pak_file_t));
-    memset(p->files, 0, sizeof(pak_file_t) * p->header.filecount);
-    
-    char namebuf[p->header.filecount * MAXFILENAME];
-    fseek(fp, p->header.offset - 12, SEEK_SET);
-    fread(namebuf, sizeof(namebuf[0]), p->header.length, fp);
-    
-    char name[MAXFILENAME];
+    memset(p->files, 0, FILEBLOCKLEN * p->header.filecount);
+
+    // move to the start of the filenames block
+    fseek(fp, p->header.offset, SEEK_SET);
+
 
     for (i=0; i<p->header.filecount; i++) {
-        memset(name, 0, sizeof(name));
-        readData(namebuf, MAXFILENAME, name);
-        
+        memset(nameblock, 0x0a, sizeof(nameblock));
+        fread(nameblock, 1, FILEBLOCKLEN, fp);
         //hexDump("name ", &name, sizeof(name));
-        
-        memcpy(&p->files[i].name, name, 56);
-        
-        p->files[i].offset = readLong(name, 56);
-        p->files[i].length = readLong(name, 60);
+
+        memcpy(&p->files[i].name, nameblock, FILENAMELEN);
+        p->files[i].offset = readLong(nameblock, FILESIZE);
+        p->files[i].length = readLong(nameblock, FILEOFFSET);
     }
 
     fclose(fp);
@@ -247,7 +289,8 @@ bool parsePak(char *pakfilename, pak_t *p) {
 /**
  * Output the files in the pak file to stdout
  */
-void listPakFiles(pak_t *p) {
+void listPakFiles(pak_t *p)
+{
     uint32_t i;
     
     for (i=0; i<p->header.filecount; i++) {
@@ -259,15 +302,13 @@ void listPakFiles(pak_t *p) {
 /**
  * Figure out what we're supposed to do
  */
-bool parseArgs(uint32_t argc, char **argv) {
-
+bool parseArgs(uint32_t argc, char **argv, int8_t *index)
+{
     uint16_t i;
     options = 0;
 
-    while ((opt = getopt(argc, argv, ":if:lrxhc")) != -1)
-    {
-        switch(opt)
-        {
+    while ((opt = getopt(argc, argv, ":if:lrxhc")) != -1) {
+        switch(opt) {
             case 'l':
                 options |= OPT_LIST;
                 break;
@@ -299,17 +340,21 @@ bool parseArgs(uint32_t argc, char **argv) {
         }
     }
 
+    *index = optind;
+
     if (options & OPT_CREATE) {
         //printf("recording files\n");
-        filestoadd = malloc(sizeof(pak_file_t) * argc);
-        memset(filestoadd, 0, sizeof(pak_file_t) * argc);
+        //filestoadd = malloc(sizeof(pak_file_t) * argc);
+        //memset(filestoadd, 0, sizeof(pak_file_t) * argc);
 
-        for(i=0; optind < argc; optind++, i++){
+        /*
+        for(i=0; optind < argc; optind++, i++) {
             //intf("extra arguments: %s\n", argv[optind]);
             memcpy(filestoadd[i].name, argv[optind], 56);
             //printf("%s\n", filestoadd[i].name);
             filestoaddcount++;
         }
+        */
     }
 
     return true;
@@ -319,13 +364,14 @@ bool parseArgs(uint32_t argc, char **argv) {
 /**
  * Make a new pak file
  */
-void createPak(pak_t *pak, pak_file_t *files) {
+void createPak(pak_t *pak, pak_file_t *files)
+{
     struct stat fs;
     uint16_t i, totallegit = 0;
     size_t totalsz = 0;
     FILE *fp, *fp_src;
     byte *data;
-    char name[MAXFILENAME];
+    char name[FILEBLOCKLEN];
 
     data = malloc(1);
 
@@ -356,7 +402,7 @@ void createPak(pak_t *pak, pak_file_t *files) {
 
     fwrite(writeLong(MAGIC), 1, 4, fp);
     fwrite(writeLong(totalsz), 1, 4, fp);
-    fwrite(writeLong(totallegit * MAXFILENAME), 1, 4, fp);
+    fwrite(writeLong(totallegit * FILEBLOCKLEN), 1, 4, fp);
 
     // write actual file data
     for (i=0; i<filestoaddcount; i++) {
@@ -379,12 +425,12 @@ void createPak(pak_t *pak, pak_file_t *files) {
             continue;
         }
 
-        memset(&name, 0, MAXFILENAME);
+        memset(&name, 0, FILEBLOCKLEN);
         memcpy(&name, files[i].name, 56);
         //memcpy(&name[56], files[i].offset, 4);
         //memcpy(&name[60], files[i].length, 4);
 
-        fwrite(&name, MAXFILENAME - 8, 1, fp);
+        fwrite(&name, FILEBLOCKLEN - 8, 1, fp);
         fwrite(writeLong(files[i].offset), 1, 4, fp);
         fwrite(writeLong(files[i].length), 1, 4, fp);
         fflush(fp);
@@ -393,13 +439,19 @@ void createPak(pak_t *pak, pak_file_t *files) {
     fclose(fp);
 }
 
-int32_t main(int32_t argc, char** argv) {
-    
+/**
+ *
+ */
+int32_t main(int32_t argc, char** argv)
+{
     pak_t pakfile;
+    int8_t index;
 
-    if (!parseArgs(argc, argv)) {
+    if (!parseArgs(argc, argv, &index)) {
         return EXIT_FAILURE;
     }
+
+    pakfilename = argv[index++];
 
     if (!options || options & OPT_USAGE) {
         usage(argv[0]);
